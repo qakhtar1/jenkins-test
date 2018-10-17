@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Creates Base EC2 Instance 
+
+Parameters:
+
+  AWSRegion:
+    Type: String
+    AllowedValues: ["virginia", "ohio"]
+    Description: Select the Region AWS Recources being deployed.
+  AWSEnvironment:
+    Type: String
+    AllowedValues: ["tfsawsprod","tfsawssubprod"]
+    Description: The deployment environment.
+  SnowEnvironment:
+    Type: String
+    AllowedValues: ["Production", "Staging", "Development", "Test", "Training", "Laboratory"]
+    Description: Select the Environment as per SNOW.
+  HostName:
+    Type: String
+    Description: Server Hostname. DONOT include domainname or _<char> app name. eg. awva-pvlap00105
+  InstanceType: 
+    Type: String
+    AllowedValues: ["t2.micro", "t2.medium", "m5.large", "m5.xlarge"]
+    Description: Select EC2 instance type 
+  AmiId:
+    Type: String
+    Default: ami-08181fe145325b065
+    Description: "Select appropriate AMI Id for deploymente. 
+    Current: Ohio RHEL7 : ami-08181fe145325b065 ; Virginia RHEL7 : ami-0b9d7ed02e4f4d33c
+    Underdevelopment: Ohio RHEL7 : ami-... ; Virginia RHEL7 : ami-...."
+
+  InstanceKeyPair: 
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: "The EC2 KeyPair to apply to the EC2 Instance. tfs-dne-compute to be used to provision EC2 instances"
+    Default: tfs-dne-compute
+  IAMRole: 
+    Type: String
+    Description: The IAM role to be used by EC2 Instance.
+    Default: tfs-srv-ec2-base-role
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Enter the right SubnetID  
+  SecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+    Description: Enter the right security groups 
+  SnowRITM:
+    Type: String
+    Description: ServiceNow - RITM for NER build
+  ChargeCode:
+    Type: String
+    Description: ServiceNow - Dept ChargeCode. Must be accurate eg. 050000-TMCCXXXX
+  SnowAppDIO:
+    Type: String
+    Description: ServiceNow - App DIO. eg. Steve Samarge  
+  SnowAppName:
+    Type: String
+    Description: ServiceNow - Application CI Name. Exactly as in SNOW
+  SnowAppCode:
+    Type: String
+    Description: ServiceNow - Please enter 4 character app code.
+  SnowAppSupport:
+    Type: String
+    Description: ServiceNow - Application Support Group as in SNOW
+  SnowRequestor:
+    Type: String
+    Description: ServiceNow - RITM Requestor
+  VolumeSize:
+    Type: String
+    Description: Enter the Volume size.
+    Default: '10' 
+
+Resources:
+  EC2Instance: 
+    Type: "AWS::EC2::Instance"
+    Properties: 
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref InstanceKeyPair
+      SecurityGroupIds: !Ref SecurityGroupIds
+      SubnetId: !Ref SubnetId
+      IamInstanceProfile: !Ref IAMRole
+      UserData:
+        'Fn::Base64': !Sub |
+          #!/bin/bash 
+          exec > >(tee /root/aws-instance-user-data.log|logger -t user-data ) 2>&1
+          echo "----------------------------------------------------------------------------"
+          echo "START :::: Starting RHEL 7.x Instance Specific Postscripts "
+          echo "----------------------------------------------------------------------------"
+          echo "Setting hostname "
+          sudo hostnamectl set-hostname --static ${HostName}
+          echo "HOSTNAME="${HostName}  >> /etc/sysconfig/network
+          postscript="ec2-instance-postscripts.sh"
+          if [[ ${AWSRegion} = "virginia" ]]
+          then
+            repo="s3://tfs-dne-repo/tfsrepo/linux/scripts/$postscript"
+          elif [[ ${AWSRegion} = "ohio" ]]
+          then
+            repo="s3://tfs-dne-repo-subprod/tfsrepo/linux/scripts/$postscript"
+          fi
+          /usr/local/bin/aws s3 cp $repo /tmp/
+          sleep 5
+          yum -y install dos2unix
+          dos2unix /tmp/$postscript
+          chmod +x /tmp/$postscript 
+          sudo /tmp/$postscript
+          echo "-------------------------------------------"
+          echo "END ::::  RHEL 7.x Instance Specific Postscripts"
+          echo "-------------------------------------------"
+          echo "START :::: Rebooting Server"
+          echo "-------------------------------------------"
+      Tags:
+      
+        - Key: Name
+          Value: !Sub ${HostName}_${SnowAppCode}  
+        - Key: HostName   
+          Value: !Ref HostName
+        - Key: SnowRITM  
+          Value: !Ref SnowRITM
+        - Key: SnowAppDIO
+          Value: !Ref SnowAppDIO
+        - Key: SnowAppName 
+          Value: !Ref SnowAppName
+        - Key: SnowAppCode  
+          Value: !Ref SnowAppCode
+        - Key: SnowChargeCode  
+          Value: !Ref ChargeCode
+        - Key: SnowAppSupport 
+          Value: !Ref SnowAppSupport
+        - Key: SnowRequestor  
+          Value: !Ref SnowRequestor
+        - Key: SnowEnvironment
+          Value: !Ref SnowEnvironment
+  EBSVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      Size: !Ref VolumeSize
+      Encrypted: 'true'
+      KmsKeyId: 
+        Fn::ImportValue:
+          !Sub "${AWSEnvironment}-${AWSRegion}-ebs-rhel-key"
+      AvailabilityZone: 
+        Fn::GetAtt: [EC2Instance, AvailabilityZone]
+      Tags: 
+        - Key: Name
+          Value: !Sub ${HostName}-disk2
+        - Key: HostName   
+          Value: !Ref HostName 
+        - Key: SnowChargeCode  
+          Value: !Ref ChargeCode
+        - Key: SnowRequestor  
+          Value: !Ref SnowRequestor
+        - Key: SnowEnvironment
+          Value: !Ref SnowEnvironment
+        - Key: BackupType
+          Value: TBD
+        - Key: BackupRetention
+          Value: TBD
+         
+  VolumeAttach:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId:
+        Ref: EC2Instance
+      VolumeId:
+        Ref: EBSVolume
+      Device: "/dev/sdf"
+
+Outputs: 
+  HostName: 
+    Value: !Ref HostName
+    Export: 
+      Name: !Sub "${HostName}"
+
+  EC2InstanceIp:
+    Description: EC2 Intance Private IP Address
+    Value: !GetAtt EC2Instance.PrivateIp
+    Export: 
+      Name: !Sub "${HostName}-IP"
